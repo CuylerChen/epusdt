@@ -7,6 +7,8 @@ import (
 	"github.com/GMWalletApp/epusdt/model/dao"
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestResolveChainWsURLRequiresEnabledRpcNode(t *testing.T) {
@@ -137,5 +139,52 @@ func TestResolveChainWsURLDisabledRow(t *testing.T) {
 
 	if got, ok := resolveChainWsURL(mdb.NetworkEthereum, "[TEST]"); ok {
 		t.Fatalf("resolveChainWsURL() = (%q, true), want false", got)
+	}
+}
+
+func TestEvmRecipientTopicsFromWalletsPadsAddressesAsTopic2(t *testing.T) {
+	wallets := []mdb.WalletAddress{
+		{Address: "0x2222222222222222222222222222222222222222"},
+		{Address: "0x1111111111111111111111111111111111111111"},
+		{Address: "0x1111111111111111111111111111111111111111"},
+		{Address: "not-an-address"},
+	}
+
+	got := evmRecipientTopicsFromWallets(wallets)
+
+	want := []common.Hash{
+		common.HexToHash("0x0000000000000000000000001111111111111111111111111111111111111111"),
+		common.HexToHash("0x0000000000000000000000002222222222222222222222222222222222222222"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("evmRecipientTopicsFromWallets() len=%d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("topic[%d]=%s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEvmTransferFilterQueryRestrictsTransferAndRecipientTopic(t *testing.T) {
+	contract := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	recipientTopic := common.HexToHash("0x0000000000000000000000004444444444444444444444444444444444444444")
+
+	got := evmTransferFilterQuery([]common.Address{contract}, []common.Hash{recipientTopic})
+
+	if len(got.Addresses) != 1 || got.Addresses[0] != contract {
+		t.Fatalf("Addresses=%#v, want only %s", got.Addresses, contract)
+	}
+	if len(got.Topics) != 3 {
+		t.Fatalf("Topics len=%d, want 3", len(got.Topics))
+	}
+	if len(got.Topics[0]) != 1 || got.Topics[0][0] != transferEventHash {
+		t.Fatalf("Topics[0]=%#v, want Transfer topic", got.Topics[0])
+	}
+	if got.Topics[1] != nil {
+		t.Fatalf("Topics[1]=%#v, want nil wildcard", got.Topics[1])
+	}
+	if len(got.Topics[2]) != 1 || got.Topics[2][0] != recipientTopic {
+		t.Fatalf("Topics[2]=%#v, want recipient topic", got.Topics[2])
 	}
 }

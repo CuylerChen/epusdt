@@ -10,8 +10,12 @@ import (
 	"github.com/GMWalletApp/epusdt/model/mdb"
 	"github.com/GMWalletApp/epusdt/util/log"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// Transfer 事件签名 — ERC-20 signature, same on every EVM chain.
+var transferEventHash = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
 // chainEnabledWatchdog returns a cancellable context whose cancel() is
 // invoked when either:
@@ -87,6 +91,73 @@ func loadChainTokenContracts(network, logPrefix string) []common.Address {
 		addrs = append(addrs, common.HexToAddress(c))
 	}
 	return addrs
+}
+
+// evmTransferFilterQuery restricts the WS subscription at the RPC node:
+// contract address AND Transfer topic0 AND recipient topic2.
+func evmTransferFilterQuery(contracts []common.Address, recipientTopics []common.Hash) ethereum.FilterQuery {
+	return ethereum.FilterQuery{
+		Addresses: contracts,
+		Topics: [][]common.Hash{
+			{transferEventHash},
+			nil,
+			recipientTopics,
+		},
+	}
+}
+
+func evmRecipientTopicsFromWallets(wallets []mdb.WalletAddress) []common.Hash {
+	seen := make(map[common.Hash]struct{}, len(wallets))
+	topics := make([]common.Hash, 0, len(wallets))
+	for _, w := range wallets {
+		address := strings.TrimSpace(w.Address)
+		if !common.IsHexAddress(address) {
+			continue
+		}
+		topic := common.BytesToHash(common.HexToAddress(address).Bytes())
+		if _, ok := seen[topic]; ok {
+			continue
+		}
+		seen[topic] = struct{}{}
+		topics = append(topics, topic)
+	}
+	sort.Slice(topics, func(i, j int) bool {
+		return topics[i].Hex() < topics[j].Hex()
+	})
+	return topics
+}
+
+func evmRecipientFingerprintFromWallets(wallets []mdb.WalletAddress) string {
+	topics := evmRecipientTopicsFromWallets(wallets)
+	parts := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		parts = append(parts, strings.ToLower(topic.Hex()))
+	}
+	return strings.Join(parts, ",")
+}
+
+func watchEvmRecipientChanges(ctx context.Context, cancel context.CancelFunc, network, logPrefix, initialFingerprint string) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				wallets, err := data.GetAvailableWalletAddressByNetwork(network)
+				if err != nil {
+					log.Sugar.Warnf("%s refresh wallet addresses: %v", logPrefix, err)
+					continue
+				}
+				if fp := evmRecipientFingerprintFromWallets(wallets); fp != initialFingerprint {
+					log.Sugar.Infof("%s wallet address set changed, reconnecting", logPrefix)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 }
 
 // resolveChainWsURL picks a healthy WS endpoint from rpc_nodes for the

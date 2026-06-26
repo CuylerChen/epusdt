@@ -12,7 +12,6 @@ import (
 	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/log"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -39,43 +38,29 @@ func StartBscWebSocketListener() {
 }
 
 func runBscListener(contracts []common.Address) {
-	ctx, cancel := chainEnabledWatchdog(mdb.NetworkBsc, "[BSC-WS]", chainTokenFingerprint(mdb.NetworkBsc))
-	defer cancel()
-
 	wallets, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkBsc)
 	if err != nil {
 		log.Sugar.Errorf("[BSC-WS] Failed to get wallet addresses: %v", err)
 		return
 	}
+	recipientTopics := evmRecipientTopicsFromWallets(wallets)
+	if len(recipientTopics) == 0 {
+		log.Sugar.Warnf("[BSC-WS] no enabled recipient wallet addresses, skip websocket subscription")
+		return
+	}
 	storeBscRecipientsFromWallets(wallets)
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkBsc)
-				if err != nil {
-					log.Sugar.Warnf("[BSC-WS] refresh wallet addresses: %v", err)
-					continue
-				}
-				storeBscRecipientsFromWallets(w)
-			}
-		}
-	}()
+
+	ctx, cancel := chainEnabledWatchdog(mdb.NetworkBsc, "[BSC-WS]", chainTokenFingerprint(mdb.NetworkBsc))
+	defer cancel()
+	watchEvmRecipientChanges(ctx, cancel, mdb.NetworkBsc, "[BSC-WS]", evmRecipientFingerprintFromWallets(wallets))
 
 	wsNode, ok := resolveChainWsNode(mdb.NetworkBsc, "[BSC-WS]")
 	if !ok {
 		return
 	}
-	log.Sugar.Infof("[BSC-WS] connecting using WSS node %s watching %d contract(s)", data.RpcNodeLogLabel(wsNode), len(contracts))
+	log.Sugar.Infof("[BSC-WS] connecting using WSS node %s watching %d contract(s), %d recipient(s)", data.RpcNodeLogLabel(wsNode), len(contracts), len(recipientTopics))
 
-	query := ethereum.FilterQuery{
-		Addresses: contracts,
-		Topics:    [][]common.Hash{},
-	}
+	query := evmTransferFilterQuery(contracts, recipientTopics)
 
 	runEvmWsLogListener(ctx, "[BSC-WS]", wsNode, query, func(client *ethclient.Client, vLog types.Log) {
 		if len(vLog.Topics) < 3 {

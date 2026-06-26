@@ -12,14 +12,10 @@ import (
 	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/log"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
-
-// Transfer 事件签名 — ERC-20 signature, same on every EVM chain.
-var transferEventHash = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
 type ethRecipientSnapshot struct {
 	addrs map[string]struct{}
@@ -44,43 +40,29 @@ func StartEthereumWebSocketListener() {
 }
 
 func runEthereumListener(contracts []common.Address) {
-	ctx, cancel := chainEnabledWatchdog(mdb.NetworkEthereum, "[ETH-WS]", chainTokenFingerprint(mdb.NetworkEthereum))
-	defer cancel()
-
 	wallets, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkEthereum)
 	if err != nil {
 		log.Sugar.Errorf("[ETH-WS] Failed to get wallet addresses: %v", err)
 		return
 	}
+	recipientTopics := evmRecipientTopicsFromWallets(wallets)
+	if len(recipientTopics) == 0 {
+		log.Sugar.Warnf("[ETH-WS] no enabled recipient wallet addresses, skip websocket subscription")
+		return
+	}
 	StoreEthRecipientsFromWallets(wallets)
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkEthereum)
-				if err != nil {
-					log.Sugar.Warnf("[ETH-WS] refresh wallet addresses: %v", err)
-					continue
-				}
-				StoreEthRecipientsFromWallets(w)
-			}
-		}
-	}()
+
+	ctx, cancel := chainEnabledWatchdog(mdb.NetworkEthereum, "[ETH-WS]", chainTokenFingerprint(mdb.NetworkEthereum))
+	defer cancel()
+	watchEvmRecipientChanges(ctx, cancel, mdb.NetworkEthereum, "[ETH-WS]", evmRecipientFingerprintFromWallets(wallets))
 
 	wsNode, ok := resolveChainWsNode(mdb.NetworkEthereum, "[ETH-WS]")
 	if !ok {
 		return
 	}
-	log.Sugar.Infof("[ETH-WS] connecting using WSS node %s watching %d contract(s)", data.RpcNodeLogLabel(wsNode), len(contracts))
+	log.Sugar.Infof("[ETH-WS] connecting using WSS node %s watching %d contract(s), %d recipient(s)", data.RpcNodeLogLabel(wsNode), len(contracts), len(recipientTopics))
 
-	query := ethereum.FilterQuery{
-		Addresses: contracts,
-		Topics:    [][]common.Hash{},
-	}
+	query := evmTransferFilterQuery(contracts, recipientTopics)
 
 	runEvmWsLogListener(ctx, "[ETH-WS]", wsNode, query, func(client *ethclient.Client, vLog types.Log) {
 		if len(vLog.Topics) < 3 {

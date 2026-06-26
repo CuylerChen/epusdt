@@ -12,7 +12,6 @@ import (
 	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/log"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -38,43 +37,29 @@ func StartPolygonWebSocketListener() {
 }
 
 func runPolygonListener(contracts []common.Address) {
-	ctx, cancel := chainEnabledWatchdog(mdb.NetworkPolygon, "[POLYGON-WS]", chainTokenFingerprint(mdb.NetworkPolygon))
-	defer cancel()
-
 	wallets, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkPolygon)
 	if err != nil {
 		log.Sugar.Errorf("[POLYGON-WS] Failed to get wallet addresses: %v", err)
 		return
 	}
+	recipientTopics := evmRecipientTopicsFromWallets(wallets)
+	if len(recipientTopics) == 0 {
+		log.Sugar.Warnf("[POLYGON-WS] no enabled recipient wallet addresses, skip websocket subscription")
+		return
+	}
 	storePolygonRecipientsFromWallets(wallets)
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkPolygon)
-				if err != nil {
-					log.Sugar.Warnf("[POLYGON-WS] refresh wallet addresses: %v", err)
-					continue
-				}
-				storePolygonRecipientsFromWallets(w)
-			}
-		}
-	}()
+
+	ctx, cancel := chainEnabledWatchdog(mdb.NetworkPolygon, "[POLYGON-WS]", chainTokenFingerprint(mdb.NetworkPolygon))
+	defer cancel()
+	watchEvmRecipientChanges(ctx, cancel, mdb.NetworkPolygon, "[POLYGON-WS]", evmRecipientFingerprintFromWallets(wallets))
 
 	wsNode, ok := resolveChainWsNode(mdb.NetworkPolygon, "[POLYGON-WS]")
 	if !ok {
 		return
 	}
-	log.Sugar.Infof("[POLYGON-WS] connecting using WSS node %s watching %d contract(s)", data.RpcNodeLogLabel(wsNode), len(contracts))
+	log.Sugar.Infof("[POLYGON-WS] connecting using WSS node %s watching %d contract(s), %d recipient(s)", data.RpcNodeLogLabel(wsNode), len(contracts), len(recipientTopics))
 
-	query := ethereum.FilterQuery{
-		Addresses: contracts,
-		Topics:    [][]common.Hash{},
-	}
+	query := evmTransferFilterQuery(contracts, recipientTopics)
 
 	runEvmWsLogListener(ctx, "[POLYGON-WS]", wsNode, query, func(client *ethclient.Client, vLog types.Log) {
 		if len(vLog.Topics) < 3 {
